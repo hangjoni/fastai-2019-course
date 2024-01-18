@@ -4,6 +4,8 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 import re
 from typing import *
+from functools import partial
+import matplotlib.pyplot as plt
 
 def accuracy(out, yb): return (torch.argmax(out, dim=1)==yb).float().mean()
 
@@ -15,6 +17,11 @@ def get_model(data, lr=0.5, nh=50):
     m = data.train_ds.x.shape[1]
     model = nn.Sequential(nn.Linear(m,nh), nn.ReLU(), nn.Linear(nh,data.c))
     return model, optim.SGD(model.parameters(), lr=lr)
+
+def create_learner(model_func, loss_func, data):
+    return Learner(*model_func(data), loss_func, data)
+
+def get_model_func(lr=0.5): return partial(get_model, lr=lr)
 
 class Dataset():
     def __init__(self, x, y): self.x,self.y = x,y
@@ -127,7 +134,7 @@ class Runner():
         return False
     
 class AvgStats():
-    def __init__(self, names, metrics, in_train): self.names,self.metrics,self.in_train = ['loss']+names,listify(metrics),in_train
+    def __init__(self, names, metrics, in_train): self.names,self.metrics,self.in_train = ['loss']+listify(names),listify(metrics),in_train
     
     def reset(self):
         self.tot_loss,self.count = 0.,0
@@ -186,3 +193,54 @@ class TrainEvalCallback(Callback):
     def begin_validate(self):
         self.model.eval()
         self.run.in_train=False
+
+# week 5 - annealing
+class Recorder(Callback):
+    """A callback to record the loss and the LR"""
+    def begin_fit(self): self.lrs,self.losses = [],[]
+
+    def after_batch(self):
+        if not self.in_train: return
+        self.lrs.append(self.opt.param_groups[-1]['lr'])
+        self.losses.append(self.loss.detach().cpu())        
+
+    def plot_lr  (self): plt.plot(self.lrs)
+    def plot_loss(self): plt.plot(self.losses)
+
+class ParamScheduler(Callback):
+    _order=1
+    def __init__(self, pname, sched_func): self.pname,self.sched_func = pname,sched_func
+
+    def set_param(self):
+        for pg in self.opt.param_groups:
+            pg[self.pname] = self.sched_func(self.n_epochs/self.epochs)
+            
+    def begin_batch(self): 
+        if self.in_train: self.set_param()
+
+def annealer(f):
+    "A function factory that take a function f use that for annealing"
+    def _inner(start, end): return partial(f, start, end)
+    return _inner
+
+@annealer
+def sched_lin(start, end, pos): return start + pos*(end-start)
+
+@annealer
+def sched_cos(start, end, pos): return start + (1 + math.cos(math.pi*(1-pos))) * (end-start) / 2
+@annealer
+def sched_no(start, end, pos):  return start
+@annealer
+def sched_exp(start, end, pos): return start * (end/start)**pos
+
+def combine_scheds(pcts, scheds):
+    assert sum(pcts)==1.
+    pcts = torch.tensor([0] + listify(pcts))
+    assert torch.all(pcts >= 0)
+    pcts = torch.cumsum(pcts, 0)
+    def _inner(pos):
+        idx = (pos >= pcts).nonzero().max()
+        if idx == len(scheds): idx -= 1
+        actual_pos = (pos - pcts[idx]) / (pcts[idx+1]-pcts[idx])
+        return scheds[idx](actual_pos)
+    return _inner
