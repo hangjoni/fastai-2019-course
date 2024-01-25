@@ -6,6 +6,17 @@ import re
 from typing import *
 from functools import partial
 import matplotlib.pyplot as plt
+from torchvision import datasets, transforms
+
+def get_data():
+    # Transform to convert images to PyTorch tensors
+    transform = transforms.Compose([transforms.ToTensor()])
+
+    # Download and load the training data
+    trainset = datasets.MNIST(root='../data', train=True, download=True, transform=transform)
+    testset = datasets.MNIST(root='../data', train=False, download=True, transform=transform)
+
+    return trainset.data.float(), trainset.targets, testset.data.float(), testset.targets
 
 def accuracy(out, yb): return (torch.argmax(out, dim=1)==yb).float().mean()
 
@@ -153,6 +164,8 @@ class AvgStats():
     def accumulate(self, run):
         bn = run.xb.shape[0]
         self.tot_loss += run.loss * bn
+        if run.loss != run.loss:
+            print('Exploding gradients detected', run.loss)
         self.count += bn
         for i, m in enumerate(self.metrics):
             self.tot_mets[i] += m(run.pred, run.yb) * bn
@@ -170,6 +183,7 @@ class AvgStatsCallback(Callback):
         with torch.no_grad(): stats.accumulate(self.run)
     
     def after_epoch(self):
+        print('Epoch: ', self.run.epoch)
         print(self.train_stats)
         print(self.valid_stats)
 
@@ -244,3 +258,18 @@ def combine_scheds(pcts, scheds):
         actual_pos = (pos - pcts[idx]) / (pcts[idx+1]-pcts[idx])
         return scheds[idx](actual_pos)
     return _inner
+
+def normalize(x, m, s): return (x-m)/s
+
+def normalize_to(train, valid):
+    m,s = train.mean(), train.std()
+    return normalize(train, m, s), normalize(valid, m, s)
+
+class Lambda(nn.Module):
+    def __init__(self, func):
+        super().__init__()
+        self.func = func
+
+    def forward(self, x): return self.func(x)
+
+def flatten(x): return x.view(x.shape[0], -1)
